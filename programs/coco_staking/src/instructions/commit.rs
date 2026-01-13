@@ -1,12 +1,12 @@
+use crate::accounts::{GlobalConfig, OrphanPool, UserAccount};
+use crate::constants::MAX_LEVELS;
+use crate::errors::ErrorCode;
+use crate::events::{CommitEvent, OrphanAssigned, SlotActivated, SplitEvent};
+use crate::utils::calc_share;
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::system_instruction;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use solana_program::program::invoke_signed;
-use anchor_spl::token::{self, Token, Transfer, TokenAccount};
-use crate::accounts::{GlobalConfig, UserAccount, OrphanPool};
-use crate::constants::{MAX_LEVELS};
-use crate::errors::ErrorCode;
-use crate::events::{CommitEvent, SplitEvent, SlotActivated, OrphanAssigned};
-use crate::utils::calc_share;
 
 #[derive(Accounts)]
 pub struct CommitLevel<'info> {
@@ -81,7 +81,12 @@ pub struct ClaimOrphans<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn claim_orphans(ctx: Context<ClaimOrphans>, level: u8, max_to_claim: u8, allow_immediate: bool) -> Result<()> {
+pub fn claim_orphans(
+    ctx: Context<ClaimOrphans>,
+    level: u8,
+    max_to_claim: u8,
+    allow_immediate: bool,
+) -> Result<()> {
     if level == 0 || level as usize > MAX_LEVELS {
         return Err(ErrorCode::InvalidLevel.into());
     }
@@ -98,7 +103,10 @@ pub fn claim_orphans(ctx: Context<ClaimOrphans>, level: u8, max_to_claim: u8, al
     let allow_immediate_flag = user.immediate_assign[idx] && allow_immediate;
     let mut eligible_by_time = false;
     if user.activation_timestamps[idx] != 0 {
-        let elapsed = clock.unix_timestamp.checked_sub(user.activation_timestamps[idx]).unwrap_or(0);
+        let elapsed = clock
+            .unix_timestamp
+            .checked_sub(user.activation_timestamps[idx])
+            .unwrap_or(0);
         if elapsed >= global.orphan_assignment_delay_seconds as i64 {
             eligible_by_time = true;
         }
@@ -116,7 +124,10 @@ pub fn claim_orphans(ctx: Context<ClaimOrphans>, level: u8, max_to_claim: u8, al
     // fetch orphan pool
     let mut pool = Account::<OrphanPool>::try_from(&ctx.accounts.orphan_pool.to_account_info())?;
 
-    let free_slots = global.slot_count.checked_sub(user.referral_slots_used[idx]).unwrap_or(0) as usize;
+    let free_slots = global
+        .slot_count
+        .checked_sub(user.referral_slots_used[idx])
+        .unwrap_or(0) as usize;
     let to_claim = std::cmp::min(free_slots, max_to_claim as usize);
 
     let p_bump = global.pending_orphan_bumps[idx];
@@ -152,8 +163,15 @@ pub fn claim_orphans(ctx: Context<ClaimOrphans>, level: u8, max_to_claim: u8, al
         )?;
 
         user.referral_slots_used[idx] = user.referral_slots_used[idx].checked_add(1).unwrap();
-        global.pending_orphan_totals[idx] = global.pending_orphan_totals[idx].checked_sub(parent_share).unwrap();
-        emit!(OrphanAssigned { orphan: orphan_pk, parent: *ctx.accounts.user_owner.to_account_info().key, level, amount: parent_share });
+        global.pending_orphan_totals[idx] = global.pending_orphan_totals[idx]
+            .checked_sub(parent_share)
+            .unwrap();
+        emit!(OrphanAssigned {
+            orphan: orphan_pk,
+            parent: *ctx.accounts.user_owner.to_account_info().key,
+            level,
+            amount: parent_share
+        });
         claimed = claimed.checked_add(1).unwrap();
     }
 
@@ -175,7 +193,11 @@ pub struct SetImmediateAssign<'info> {
     pub user_account: Account<'info, UserAccount>,
 }
 
-pub fn set_immediate_assign(ctx: Context<SetImmediateAssign>, level: u8, enabled: bool) -> Result<()> {
+pub fn set_immediate_assign(
+    ctx: Context<SetImmediateAssign>,
+    level: u8,
+    enabled: bool,
+) -> Result<()> {
     if level == 0 || level as usize > MAX_LEVELS {
         return Err(ErrorCode::InvalidLevel.into());
     }
@@ -192,7 +214,11 @@ pub struct AdminSetUserActivationTimestamp<'info> {
     pub user_account: Account<'info, UserAccount>,
 }
 
-pub fn admin_set_user_activation_timestamp(ctx: Context<AdminSetUserActivationTimestamp>, level: u8, ts: i64) -> Result<()> {
+pub fn admin_set_user_activation_timestamp(
+    ctx: Context<AdminSetUserActivationTimestamp>,
+    level: u8,
+    ts: i64,
+) -> Result<()> {
     if level == 0 || level as usize > MAX_LEVELS {
         return Err(ErrorCode::InvalidLevel.into());
     }
@@ -202,7 +228,48 @@ pub fn admin_set_user_activation_timestamp(ctx: Context<AdminSetUserActivationTi
     Ok(())
 }
 
-pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubkey>, immediate_orphan_assign: bool) -> Result<()> {
+#[derive(Accounts)]
+pub struct AdminSetUserDailyCounters<'info> {
+    pub admin: Signer<'info>,
+    #[account(mut)]
+    pub user_account: Account<'info, UserAccount>,
+}
+
+pub fn admin_set_user_daily_counters(
+    ctx: Context<AdminSetUserDailyCounters>,
+    last_daily_reset_ts: i64,
+    daily_committed_total: u64,
+) -> Result<()> {
+    let user = &mut ctx.accounts.user_account;
+    user.last_daily_reset_ts = last_daily_reset_ts;
+    user.daily_committed_total = daily_committed_total;
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct AdminSetUserCommits<'info> {
+    pub admin: Signer<'info>,
+    #[account(mut)]
+    pub user_account: Account<'info, UserAccount>,
+}
+
+pub fn admin_set_user_commits(
+    ctx: Context<AdminSetUserCommits>,
+    last_commit_window_ts: i64,
+    commits_in_window: u8,
+) -> Result<()> {
+    let user = &mut ctx.accounts.user_account;
+    user.last_commit_window_ts = last_commit_window_ts;
+    user.commits_in_window = commits_in_window;
+    Ok(())
+}
+
+pub fn commit_level(
+    ctx: Context<CommitLevel>,
+    level: u8,
+    referrer: Option<Pubkey>,
+    immediate_orphan_assign: bool,
+) -> Result<()> {
     // Basic validation
     if level == 0 || level as usize > MAX_LEVELS {
         return Err(ErrorCode::InvalidLevel.into());
@@ -232,7 +299,10 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
     }
 
     // increment optimistic commits count and check
-    let new_commits = user.commits_in_window.checked_add(1).ok_or(ErrorCode::RateLimitExceeded)?;
+    let new_commits = user
+        .commits_in_window
+        .checked_add(1)
+        .ok_or(ErrorCode::RateLimitExceeded)?;
     if new_commits > global.per_wallet_max_commits_per_minute {
         return Err(ErrorCode::RateLimitExceeded.into());
     }
@@ -245,7 +315,12 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
 
     let price = global.level_prices[idx];
     // check daily cap
-    if user.daily_committed_total.checked_add(price).unwrap_or(u64::MAX) > global.per_wallet_daily_cap {
+    if user
+        .daily_committed_total
+        .checked_add(price)
+        .unwrap_or(u64::MAX)
+        > global.per_wallet_daily_cap
+    {
         return Err(ErrorCode::DailyCapExceeded.into());
     }
 
@@ -262,12 +337,15 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
         // check referrer_user_account matches provided pubkey and has level active
         if ctx.accounts.referrer_user_account.to_account_info().key == &ref_pk {
             // try to deserialize as UserAccount
-            if let Ok(mut ref_acc) = Account::<UserAccount>::try_from(&ctx.accounts.referrer_user_account.to_account_info()) {
+            if let Ok(mut ref_acc) = Account::<UserAccount>::try_from(
+                &ctx.accounts.referrer_user_account.to_account_info(),
+            ) {
                 if ref_acc.activated[idx] && ref_acc.referral_slots_used[idx] < global.slot_count {
                     // referral case
                     is_referral = true;
                     // increment slot usage
-                    ref_acc.referral_slots_used[idx] = ref_acc.referral_slots_used[idx].checked_add(1).unwrap();
+                    ref_acc.referral_slots_used[idx] =
+                        ref_acc.referral_slots_used[idx].checked_add(1).unwrap();
                     referrer_pubkey = Some(ref_pk);
                 }
             }
@@ -341,7 +419,11 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
             };
             let seeds: &[&[u8]] = &[b"global-config".as_ref(), &[global.bump]];
             let signer: &[&[&[u8]]] = &[&seeds];
-            let cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info().clone(), cpi_accounts, signer);
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info().clone(),
+                cpi_accounts,
+                signer,
+            );
             token::transfer(cpi_ctx, coco_amount)?;
 
             // Optionally also send reward to referrer (policy can be same or separate)
@@ -357,11 +439,26 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
         user.activation_timestamps[idx] = clock.unix_timestamp;
 
         // finalize anti-gaming counters: increment commits_in_window and daily total
-        user.commits_in_window = user.commits_in_window.checked_add(1).unwrap_or(user.commits_in_window);
-        user.daily_committed_total = user.daily_committed_total.checked_add(price).unwrap_or(user.daily_committed_total);
+        user.commits_in_window = user
+            .commits_in_window
+            .checked_add(1)
+            .unwrap_or(user.commits_in_window);
+        user.daily_committed_total = user
+            .daily_committed_total
+            .checked_add(price)
+            .unwrap_or(user.daily_committed_total);
 
-        emit!(CommitEvent { user: *ctx.accounts.payer.key(), level, lamports: price, referrer: referrer_pubkey });
-        emit!(SplitEvent { home: home_share, referrer: Some(ref_share), orphan_pool: None });
+        emit!(CommitEvent {
+            user: *ctx.accounts.payer.key(),
+            level,
+            lamports: price,
+            referrer: referrer_pubkey
+        });
+        emit!(SplitEvent {
+            home: home_share,
+            referrer: Some(ref_share),
+            orphan_pool: None
+        });
 
         // After activation, attempt auto-assign orphans to this user if they have slots and are eligible
         if ctx.accounts.orphan_pool.to_account_info().data_len() > 0 {
@@ -369,23 +466,31 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
             let allow_immediate = immediate_orphan_assign || user.immediate_assign[idx];
             let mut eligible_by_time = false;
             if user.activation_timestamps[idx] != 0 {
-                let elapsed = clock.unix_timestamp.checked_sub(user.activation_timestamps[idx]).unwrap_or(0);
+                let elapsed = clock
+                    .unix_timestamp
+                    .checked_sub(user.activation_timestamps[idx])
+                    .unwrap_or(0);
                 if elapsed >= global.orphan_assignment_delay_seconds as i64 {
                     eligible_by_time = true;
                 }
             }
 
             if allow_immediate || eligible_by_time {
-                if let Ok(mut pool) = Account::<OrphanPool>::try_from(&ctx.accounts.orphan_pool.to_account_info()) {
+                if let Ok(mut pool) =
+                    Account::<OrphanPool>::try_from(&ctx.accounts.orphan_pool.to_account_info())
+                {
                     // verify pending orphan PDA matches global config
                     if ctx.accounts.pending_orphan_pda.key() != global.pending_orphan_pdas[idx] {
                         return Err(ErrorCode::PendingOrphanMismatch.into());
                     }
                     let p_bump = global.pending_orphan_bumps[idx];
-                    while (user.referral_slots_used[idx] < global.slot_count) && !pool.queue.is_empty() {
+                    while (user.referral_slots_used[idx] < global.slot_count)
+                        && !pool.queue.is_empty()
+                    {
                         let orphan_pk = pool.queue.remove(0);
                         // transfer parent_share from pending orphan PDA to this user (user_owner)
-                        let parent_share = calc_share(global.level_prices[idx], global.orphan_parent_bps);
+                        let parent_share =
+                            calc_share(global.level_prices[idx], global.orphan_parent_bps);
 
                         // ensure pending orphan totals has enough
                         if global.pending_orphan_totals[idx] < parent_share {
@@ -413,9 +518,17 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
                             signer,
                         )?;
 
-                        user.referral_slots_used[idx] = user.referral_slots_used[idx].checked_add(1).unwrap();
-                        global.pending_orphan_totals[idx] = global.pending_orphan_totals[idx].checked_sub(parent_share).unwrap();
-                        emit!(OrphanAssigned { orphan: orphan_pk, parent: *ctx.accounts.user_owner.to_account_info().key, level, amount: parent_share });
+                        user.referral_slots_used[idx] =
+                            user.referral_slots_used[idx].checked_add(1).unwrap();
+                        global.pending_orphan_totals[idx] = global.pending_orphan_totals[idx]
+                            .checked_sub(parent_share)
+                            .unwrap();
+                        emit!(OrphanAssigned {
+                            orphan: orphan_pk,
+                            parent: *ctx.accounts.user_owner.to_account_info().key,
+                            level,
+                            amount: parent_share
+                        });
                     }
                 }
             }
@@ -430,13 +543,16 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
         // Push to orphan pool queue if provided (best-effort)
         if ctx.accounts.orphan_pool.to_account_info().data_len() > 0 {
             // attempt to deserialize
-            if let Ok(mut pool) = Account::<OrphanPool>::try_from(&ctx.accounts.orphan_pool.to_account_info()) {
+            if let Ok(mut pool) =
+                Account::<OrphanPool>::try_from(&ctx.accounts.orphan_pool.to_account_info())
+            {
                 pool.queue.push(*ctx.accounts.payer.key());
             }
         }
 
         // Transfer parent_share to pending orphan PDA
-        if ctx.accounts.pending_orphan_pda.to_account_info().key != &global.pending_orphan_pdas[idx] {
+        if ctx.accounts.pending_orphan_pda.to_account_info().key != &global.pending_orphan_pdas[idx]
+        {
             return Err(ErrorCode::PendingOrphanMismatch.into());
         }
         let ix_parent = system_instruction::transfer(
@@ -454,7 +570,9 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
             &[],
         )?;
         // update pending totals
-        global.pending_orphan_totals[idx] = global.pending_orphan_totals[idx].checked_add(parent_share).unwrap();
+        global.pending_orphan_totals[idx] = global.pending_orphan_totals[idx]
+            .checked_add(parent_share)
+            .unwrap();
 
         // Transfer home share to treasury
         let ix_home = system_instruction::transfer(
@@ -502,7 +620,11 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
             };
             let seeds: &[&[u8]] = &[b"global-config".as_ref(), &[global.bump]];
             let signer: &[&[&[u8]]] = &[&seeds];
-            let cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info().clone(), cpi_accounts, signer);
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info().clone(),
+                cpi_accounts,
+                signer,
+            );
             token::transfer(cpi_ctx, coco_amount)?;
         }
 
@@ -514,8 +636,17 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
         let clock = Clock::get()?;
         user.activation_timestamps[idx] = clock.unix_timestamp;
 
-        emit!(CommitEvent { user: *ctx.accounts.payer.key(), level, lamports: price, referrer: None });
-        emit!(SplitEvent { home: home_share, referrer: None, orphan_pool: Some(parent_share) });
+        emit!(CommitEvent {
+            user: *ctx.accounts.payer.key(),
+            level,
+            lamports: price,
+            referrer: None
+        });
+        emit!(SplitEvent {
+            home: home_share,
+            referrer: None,
+            orphan_pool: Some(parent_share)
+        });
 
         // After activation, attempt auto-assign orphans to this user if they have slots and are eligible
         if ctx.accounts.orphan_pool.to_account_info().data_len() > 0 {
@@ -523,24 +654,34 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
             let allow_immediate = immediate_orphan_assign || user.immediate_assign[idx];
             let mut eligible_by_time = false;
             if user.activation_timestamps[idx] != 0 {
-                let elapsed = clock.unix_timestamp.checked_sub(user.activation_timestamps[idx]).unwrap_or(0);
+                let elapsed = clock
+                    .unix_timestamp
+                    .checked_sub(user.activation_timestamps[idx])
+                    .unwrap_or(0);
                 if elapsed >= global.orphan_assignment_delay_seconds as i64 {
                     eligible_by_time = true;
                 }
             }
 
             if allow_immediate || eligible_by_time {
-                if let Ok(mut pool) = Account::<OrphanPool>::try_from(&ctx.accounts.orphan_pool.to_account_info()) {
+                if let Ok(mut pool) =
+                    Account::<OrphanPool>::try_from(&ctx.accounts.orphan_pool.to_account_info())
+                {
                     // verify pending orphan PDA matches global config
-                    if ctx.accounts.pending_orphan_pda.to_account_info().key != &global.pending_orphan_pdas[idx] {
+                    if ctx.accounts.pending_orphan_pda.to_account_info().key
+                        != &global.pending_orphan_pdas[idx]
+                    {
                         return Err(ErrorCode::PendingOrphanMismatch.into());
                     }
                     let p_bump = global.pending_orphan_bumps[idx];
-                    while (user.referral_slots_used[idx] < global.slot_count) && !pool.queue.is_empty() {
+                    while (user.referral_slots_used[idx] < global.slot_count)
+                        && !pool.queue.is_empty()
+                    {
                         let orphan_pk = pool.queue.remove(0);
 
                         // transfer parent_share from pending orphan PDA to parent owner
-                        let parent_share = calc_share(global.level_prices[idx], global.orphan_parent_bps);
+                        let parent_share =
+                            calc_share(global.level_prices[idx], global.orphan_parent_bps);
 
                         // ensure pending orphan totals has enough
                         if global.pending_orphan_totals[idx] < parent_share {
@@ -568,9 +709,17 @@ pub fn commit_level(ctx: Context<CommitLevel>, level: u8, referrer: Option<Pubke
                             signer,
                         )?;
 
-                        user.referral_slots_used[idx] = user.referral_slots_used[idx].checked_add(1).unwrap();
-                        global.pending_orphan_totals[idx] = global.pending_orphan_totals[idx].checked_sub(parent_share).unwrap();
-                        emit!(OrphanAssigned { orphan: orphan_pk, parent: *ctx.accounts.user_owner.to_account_info().key, level, amount: parent_share });
+                        user.referral_slots_used[idx] =
+                            user.referral_slots_used[idx].checked_add(1).unwrap();
+                        global.pending_orphan_totals[idx] = global.pending_orphan_totals[idx]
+                            .checked_sub(parent_share)
+                            .unwrap();
+                        emit!(OrphanAssigned {
+                            orphan: orphan_pk,
+                            parent: *ctx.accounts.user_owner.to_account_info().key,
+                            level,
+                            amount: parent_share
+                        });
                     }
                 }
             }

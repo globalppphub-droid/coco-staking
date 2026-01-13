@@ -362,6 +362,386 @@ describe('remainder and balance checks', () => {
       failed = true;
     }
     assert.strictEqual(failed, true);
+  });
+
+  it('admin validation: set_rate_limits rejects per_minute == 0', async () => {
+    let failed = false;
+    try {
+      await program.methods.setRateLimits(0, 1_000_000_000)
+        .accounts({ admin: provider.wallet.publicKey, global: globalPDA })
+        .rpc();
+    } catch (e) {
+      failed = true;
+    }
+    assert.strictEqual(failed, true);
+  });
+
+  it('admin validation: initialize_global rejects orphan_parent_bps > 10000', async () => {
+    let failed = false;
+    const MAX_LEVELS = 3;
+    const levelPrices = new Array(MAX_LEVELS).fill(1_000_000);
+    const cocoRewards = new Array(MAX_LEVELS).fill(10);
+    try {
+      await program.methods.initializeGlobal(levelPrices, cocoRewards, 1000, 20000, 3)
+        .accounts({ admin: provider.wallet.publicKey })
+        .rpc();
+    } catch (e) {
+      failed = true;
+    }
+    assert.strictEqual(failed, true);
+  });
+
+  it('daily cap reset via admin helper: old timestamp resets totals and allows commit', async () => {
+    const actor = Keypair.generate();
+    await provider.connection.requestAirdrop(actor.publicKey, 5_000_000_000);
+    const idx = level - 1;
+    const price = Number(global.levelPrices[idx]);
+
+    // set a small daily cap (2x price)
+    const smallDailyCap = price * 2;
+    await program.methods.setRateLimits(1000, smallDailyCap)
+      .accounts({ admin: provider.wallet.publicKey, global: globalPDA })
+      .rpc();
+
+    // perform exactly two commits to reach the cap
+    for (let i = 0; i < 2; i++) {
+      await program.methods.commitLevel(level, null, false)
+        .accounts({
+          payer: actor.publicKey,
+          global: globalPDA,
+          userAccount: actor.publicKey,
+          userOwner: actor.publicKey,
+          referrerUserAccount: actor.publicKey,
+          orphanPool: global.orphanPools ? global.orphanPools[idx] : actor.publicKey,
+          pendingOrphanPda: global.pendingOrphanPdas[idx] || actor.publicKey,
+          treasury: global.treasury,
+          campaignTokenAta: campaignAtaLocal || actor.publicKey,
+          userTokenAta: actor.publicKey,
+          referrerTokenAta: actor.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([actor])
+        .rpc();
+    }
+
+    // third commit should fail due to daily cap
+    let failed = false;
+    try {
+      await program.methods.commitLevel(level, null, false)
+        .accounts({
+          payer: actor.publicKey,
+          global: globalPDA,
+          userAccount: actor.publicKey,
+          userOwner: actor.publicKey,
+          referrerUserAccount: actor.publicKey,
+          orphanPool: global.orphanPools ? global.orphanPools[idx] : actor.publicKey,
+          pendingOrphanPda: global.pendingOrphanPdas[idx] || actor.publicKey,
+          treasury: global.treasury,
+          campaignTokenAta: campaignAtaLocal || actor.publicKey,
+          userTokenAta: actor.publicKey,
+          referrerTokenAta: actor.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([actor])
+        .rpc();
+    } catch (e) {
+      failed = true;
+    }
+    assert.strictEqual(failed, true);
+
+    // set user's last_daily_reset_ts to old and keep daily_committed_total at cap via admin helper
+    const now = Math.floor(Date.now() / 1000);
+    const oldTs = now - (86400 + 10);
+    await program.methods.adminSetUserDailyCounters(oldTs, smallDailyCap)
+      .accounts({ admin: provider.wallet.publicKey, userAccount: actor.publicKey })
+      .rpc();
+
+    // now commit should succeed because the on-chain reset will occur before cap check
+    failed = false;
+    try {
+      await program.methods.commitLevel(level, null, false)
+        .accounts({
+          payer: actor.publicKey,
+          global: globalPDA,
+          userAccount: actor.publicKey,
+          userOwner: actor.publicKey,
+          referrerUserAccount: actor.publicKey,
+          orphanPool: global.orphanPools ? global.orphanPools[idx] : actor.publicKey,
+          pendingOrphanPda: global.pendingOrphanPdas[idx] || actor.publicKey,
+          treasury: global.treasury,
+          campaignTokenAta: campaignAtaLocal || actor.publicKey,
+          userTokenAta: actor.publicKey,
+          referrerTokenAta: actor.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([actor])
+        .rpc();
+    } catch (e) {
+      failed = true;
+    }
+    assert.strictEqual(failed, false);
+  });
+
+  it('rate limit: per-minute cap enforced across levels', async () => {
+    // set per-minute cap to 1
+    await program.methods.setRateLimits(1, 1_000_000_000_000)
+      .accounts({ admin: provider.wallet.publicKey, global: globalPDA })
+      .rpc();
+
+    const actor = Keypair.generate();
+    await provider.connection.requestAirdrop(actor.publicKey, 5_000_000_000);
+
+    // create user account PDA for actor
+    try {
+      await program.methods.createUser()
+        .accounts({ userAccount: actor.publicKey, owner: actor.publicKey, payer: actor.publicKey, systemProgram: SystemProgram.programId })
+        .signers([actor])
+        .rpc();
+    } catch (e) {
+      // ignore if exists
+    }
+
+    // first commit level 1 should succeed
+    await program.methods.commitLevel(1, null, false)
+      .accounts({
+        payer: actor.publicKey,
+        global: globalPDA,
+        userAccount: actor.publicKey,
+        userOwner: actor.publicKey,
+        referrerUserAccount: actor.publicKey,
+        orphanPool: global.orphanPools ? global.orphanPools[0] : actor.publicKey,
+        pendingOrphanPda: global.pendingOrphanPdas[0] || actor.publicKey,
+        treasury: global.treasury,
+        campaignTokenAta: campaignAtaLocal || actor.publicKey,
+        userTokenAta: actor.publicKey,
+        referrerTokenAta: actor.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([actor])
+      .rpc();
+
+    // immediate second commit to level 2 should fail due to per-minute cap
+    let failed = false;
+    try {
+      await program.methods.commitLevel(2, null, false)
+        .accounts({
+          payer: actor.publicKey,
+          global: globalPDA,
+          userAccount: actor.publicKey,
+          userOwner: actor.publicKey,
+          referrerUserAccount: actor.publicKey,
+          orphanPool: global.orphanPools ? global.orphanPools[1] : actor.publicKey,
+          pendingOrphanPda: global.pendingOrphanPdas[1] || actor.publicKey,
+          treasury: global.treasury,
+          campaignTokenAta: campaignAtaLocal || actor.publicKey,
+          userTokenAta: actor.publicKey,
+          referrerTokenAta: actor.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([actor])
+        .rpc();
+    } catch (e) {
+      failed = true;
+    }
+    assert.strictEqual(failed, true);
+  });
+
+  it('rate limit: window reset via admin_set_user_commits allows further commits', async () => {
+    const actor = Keypair.generate();
+    await provider.connection.requestAirdrop(actor.publicKey, 5_000_000_000);
+
+    // create user account
+    try {
+      await program.methods.createUser()
+        .accounts({ userAccount: actor.publicKey, owner: actor.publicKey, payer: actor.publicKey, systemProgram: SystemProgram.programId })
+        .signers([actor])
+        .rpc();
+    } catch (e) { }
+
+    // set per-minute cap to 1
+    await program.methods.setRateLimits(1, 1_000_000_000_000)
+      .accounts({ admin: provider.wallet.publicKey, global: globalPDA })
+      .rpc();
+
+    // first commit succeeds
+    await program.methods.commitLevel(1, null, false)
+      .accounts({
+        payer: actor.publicKey,
+        global: globalPDA,
+        userAccount: actor.publicKey,
+        userOwner: actor.publicKey,
+        referrerUserAccount: actor.publicKey,
+        orphanPool: global.orphanPools ? global.orphanPools[0] : actor.publicKey,
+        pendingOrphanPda: global.pendingOrphanPdas[0] || actor.publicKey,
+        treasury: global.treasury,
+        campaignTokenAta: campaignAtaLocal || actor.publicKey,
+        userTokenAta: actor.publicKey,
+        referrerTokenAta: actor.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([actor])
+      .rpc();
+
+    // admin sets last_commit_window_ts to an old window (simulate passing time)
+    const now = Math.floor(Date.now() / 1000);
+    const oldWindow = Math.floor((now - 120) / 60);
+    await program.methods.adminSetUserCommits(oldWindow, 1)
+      .accounts({ admin: provider.wallet.publicKey, userAccount: actor.publicKey })
+      .rpc();
+
+    // now commit to level 2 should succeed
+    let failed = false;
+    try {
+      await program.methods.commitLevel(2, null, false)
+        .accounts({
+          payer: actor.publicKey,
+          global: globalPDA,
+          userAccount: actor.publicKey,
+          userOwner: actor.publicKey,
+          referrerUserAccount: actor.publicKey,
+          orphanPool: global.orphanPools ? global.orphanPools[1] : actor.publicKey,
+          pendingOrphanPda: global.pendingOrphanPdas[1] || actor.publicKey,
+          treasury: global.treasury,
+          campaignTokenAta: campaignAtaLocal || actor.publicKey,
+          userTokenAta: actor.publicKey,
+          referrerTokenAta: actor.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([actor])
+        .rpc();
+    } catch (e) {
+      failed = true;
+    }
+    assert.strictEqual(failed, false);
+  });
+
+  it('rate limit: overflow handling rejects commits when commits_in_window is max', async () => {
+    const actor = Keypair.generate();
+    await provider.connection.requestAirdrop(actor.publicKey, 5_000_000_000);
+
+    // create user account
+    try {
+      await program.methods.createUser()
+        .accounts({ userAccount: actor.publicKey, owner: actor.publicKey, payer: actor.publicKey, systemProgram: SystemProgram.programId })
+        .signers([actor])
+        .rpc();
+    } catch (e) { }
+
+    // admin sets commits_in_window to 255 and last_commit_window_ts to current window
+    const now = Math.floor(Date.now() / 1000);
+    const curWindow = Math.floor(now / 60);
+    await program.methods.adminSetUserCommits(curWindow, 255)
+      .accounts({ admin: provider.wallet.publicKey, userAccount: actor.publicKey })
+      .rpc();
+
+    // attempt to commit level 1 should fail due to overflow check
+    let failed = false;
+    try {
+      await program.methods.commitLevel(1, null, false)
+        .accounts({
+          payer: actor.publicKey,
+          global: globalPDA,
+          userAccount: actor.publicKey,
+          userOwner: actor.publicKey,
+          referrerUserAccount: actor.publicKey,
+          orphanPool: global.orphanPools ? global.orphanPools[0] : actor.publicKey,
+          pendingOrphanPda: global.pendingOrphanPdas[0] || actor.publicKey,
+          treasury: global.treasury,
+          campaignTokenAta: campaignAtaLocal || actor.publicKey,
+          userTokenAta: actor.publicKey,
+          referrerTokenAta: actor.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([actor])
+        .rpc();
+    } catch (e) {
+      failed = true;
+    }
+    assert.strictEqual(failed, true);
+  });
+
+  it('rate limit: concurrent bursts respect per-minute cap', async () => {
+    const actor = Keypair.generate();
+    await provider.connection.requestAirdrop(actor.publicKey, 10_000_000_000);
+
+    // create user account
+    try {
+      await program.methods.createUser()
+        .accounts({ userAccount: actor.publicKey, owner: actor.publicKey, payer: actor.publicKey, systemProgram: SystemProgram.programId })
+        .signers([actor])
+        .rpc();
+    } catch (e) { }
+
+    // set per-minute cap to 2
+    await program.methods.setRateLimits(2, 1_000_000_000_000)
+      .accounts({ admin: provider.wallet.publicKey, global: globalPDA })
+      .rpc();
+
+    // first commit (level 1)
+    await program.methods.commitLevel(1, null, false)
+      .accounts({
+        payer: actor.publicKey,
+        global: globalPDA,
+        userAccount: actor.publicKey,
+        userOwner: actor.publicKey,
+        referrerUserAccount: actor.publicKey,
+        orphanPool: global.orphanPools ? global.orphanPools[0] : actor.publicKey,
+        pendingOrphanPda: global.pendingOrphanPdas[0] || actor.publicKey,
+        treasury: global.treasury,
+        campaignTokenAta: campaignAtaLocal || actor.publicKey,
+        userTokenAta: actor.publicKey,
+        referrerTokenAta: actor.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([actor])
+      .rpc();
+
+    // attempt two commits (level2 and level3) concurrently - at most one should succeed
+    const p1 = program.methods.commitLevel(2, null, false).accounts({
+      payer: actor.publicKey,
+      global: globalPDA,
+      userAccount: actor.publicKey,
+      userOwner: actor.publicKey,
+      referrerUserAccount: actor.publicKey,
+      orphanPool: global.orphanPools ? global.orphanPools[1] : actor.publicKey,
+      pendingOrphanPda: global.pendingOrphanPdas[1] || actor.publicKey,
+      treasury: global.treasury,
+      campaignTokenAta: campaignAtaLocal || actor.publicKey,
+      userTokenAta: actor.publicKey,
+      referrerTokenAta: actor.publicKey,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    }).signers([actor]).rpc();
+
+    const p2 = program.methods.commitLevel(3, null, false).accounts({
+      payer: actor.publicKey,
+      global: globalPDA,
+      userAccount: actor.publicKey,
+      userOwner: actor.publicKey,
+      referrerUserAccount: actor.publicKey,
+      orphanPool: global.orphanPools ? global.orphanPools[2] : actor.publicKey,
+      pendingOrphanPda: global.pendingOrphanPdas[2] || actor.publicKey,
+      treasury: global.treasury,
+      campaignTokenAta: campaignAtaLocal || actor.publicKey,
+      userTokenAta: actor.publicKey,
+      referrerTokenAta: actor.publicKey,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    }).signers([actor]).rpc();
+
+    const results = await Promise.allSettled([p1, p2]);
+    const failures = results.filter(r => r.status === 'rejected').length;
+    // at least one should fail because cap is 2 and we already used 1 slot
+    assert.ok(failures >= 1);
   });    // set per-minute cap to 1
   await program.methods.setRateLimits(1, 1_000_000_000_000)
     .accounts({ admin: provider.wallet.publicKey, global: globalPDA })
