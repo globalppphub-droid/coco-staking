@@ -30,7 +30,6 @@ jobs:
         with:
           node-version: "18"
           cache: "npm"
-          cache-dependency-path: programs/coco_staking/package-lock.json
 
       - name: Install Solana CLI
         run: |
