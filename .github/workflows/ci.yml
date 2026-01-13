@@ -2,7 +2,7 @@ name: CI - Anchor tests
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, ci/add-github-actions]
   pull_request:
     branches: [main, master]
   workflow_dispatch: {}
